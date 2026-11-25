@@ -1,6 +1,6 @@
 # mic-health: detect and recover stuck USB microphones
 
-Design for a NixOS workstation with USB microphones. Status: **design only, not implemented.**
+Design for a NixOS workstation with USB microphones. Status: **phase 1 (alert-only probe) implemented**; actuator not yet.
 The implementation is this repo: a Rust workspace with two binaries, `mic-probe` and `mic-reset`, plus a NixOS module (`nixosModules.default`).
 
 Machine-specific values (serials, PipeWire source names) belong in the host's NixOS config, not here. `<BLUE_SERIAL>` and `<NANO_SERIAL>` below are placeholders.
@@ -145,8 +145,11 @@ For each mic on the allowlist:
      - The kernel assigns a new `devnum` on every enumeration. The Nov 21 fault went from devnum
        5 to 7, and today's physical replug went from 7 to 8.
      - A software reset (`authorized` 0→1) does **not** change `devnum` (it stayed 8, verified).
-       So after one reset the gate closes, and a mic that is still dead is **not** reset again.
-       That gives a natural loop-breaker on top of the rate limit.
+       That alone does not close the gate: the address still differs from the last `Ok` one.
+       So the probe also records the address it requested a reset for (`reset_requested_addr`)
+       and restarts the dead streak. A mic still dead at that address gets one "still silent"
+       notice and **no** second request. A new enumeration (new address) or an `Ok` re-opens
+       the gate. That is the loop-breaker, on top of the actuator's rate limit.
      - If the candidate is `Dead` with an unchanged `devnum`, the mic is most likely **muted**.
        Send one notification ("Blue mic silent: muted?"), and **never** a reset request.
      - With no `Ok` probe on record (fresh boot), there is no baseline, so notify only.
@@ -360,12 +363,13 @@ Table-driven unit tests: each row has a `description`, the input and `expected`.
   - 23 999 frames → `Error`
   - empty buffer → `Error`
   - odd byte count → `Error`
-- **Re-enumeration gate** (`decide(last_ok_devnum, current_devnum, dead_streak)`)
+- **Re-enumeration gate** (`MicState::step(observation)`, in `mic-health-common/src/gate.rs`)
   - 3× dead and devnum changed → request reset
   - 3× dead and devnum unchanged → notify "muted?" only
   - 3× dead with no `Ok` baseline → notify only
   - 2× dead and devnum changed → wait
-  - dead after our own reset (devnum unchanged) → notify only, no second reset
+  - dead after our own reset (devnum unchanged) → 3 fresh dead probes, then "still silent", no second request
+  - re-enumerated again after a reset → gate re-opens
   - device absent → notify absent, no reset
 - **Request parser**
   - `[0x01, 0]` → ok

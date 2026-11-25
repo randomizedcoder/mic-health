@@ -4,8 +4,9 @@ Detects USB microphones that are **enumerated but silent** (every sample exactly
 after a USB glitch such as `error -71`). It recovers them with a **software replug of that one
 device**, using a privilege-separated, rate-limited design.
 
-> Status: **design + skeleton.** The binaries print "not implemented" and exit 2. The NixOS module
-> declares its options but installs nothing yet.
+> Status: **phase 1, alert-only.** `mic-probe` and its user service and timer work: they probe,
+> apply the gate and notify, but never reset. `mic-reset` (phase 2) is still a stub, and the module
+> rejects any mode other than `alert-only`.
 
 ## How it works (short version)
 
@@ -17,7 +18,7 @@ device**, using a privilege-separated, rate-limited design.
 
 Full design, threat model, experiment results and test plan: [`docs/design.md`](docs/design.md).
 
-## Use (once implemented)
+## Use
 
 ```nix
 # flake.nix
@@ -28,13 +29,16 @@ imports = [ inputs.mic-health.nixosModules.default ];
 services.micHealth = {
   enable = true;
   user = "alice";
-  mode = "alert-only";   # then "dry-run", then "enforce"
+  mode = "alert-only";   # "dry-run" / "enforce" arrive with phase 2
   mics = [
     { name = "desk"; vendor = "046d"; product = "0ab7"; serial = "<serial>";
       source = "alsa_input.usb-..."; }
   ];
 };
 ```
+
+Logs: `journalctl --user -u mic-probe`. State: `~/.local/state/mic-health/probe-state.json`.
+Run once by hand: `systemctl --user start mic-probe`.
 
 ## Develop
 
@@ -43,5 +47,7 @@ nix develop          # cargo, clippy, rustfmt, rust-analyzer, cargo-deny
 cargo test
 nix flake check      # builds, runs tests and clippy (-D warnings)
 ```
+
+If rustup is installed, `cargo clippy` may run rustup's older clippy from `~/.cargo/bin`; use `nix flake check`.
 
 Tests are table-driven: each case has a `description` and an `expected` value.

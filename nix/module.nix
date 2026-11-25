@@ -1,8 +1,13 @@
 self:
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
-# Skeleton: options only. The units, users, udev rules and socket from docs/design.md
-# ("Configuration") are not wired up yet, so enabling this does nothing but warn.
+# Phase 1 (alert-only): installs the unprivileged mic-probe user service and timer.
+# The actuator (socket, mic-reset service, users, udev rules) comes in phase 2.
 
 let
   cfg = config.services.micHealth;
@@ -31,6 +36,27 @@ let
       };
     };
   };
+
+  # The list index of `mics` is the wire-protocol device index, so order is significant.
+  configFile = pkgs.writeText "mic-health.json" (
+    builtins.toJSON {
+      inherit (cfg) mode;
+      mics = map (m: {
+        inherit (m)
+          name
+          vendor
+          product
+          serial
+          source
+          ;
+      }) cfg.mics;
+      tools = {
+        pw_dump = "${pkgs.pipewire}/bin/pw-dump";
+        pw_record = "${pkgs.pipewire}/bin/pw-record";
+        notify_send = "${pkgs.libnotify}/bin/notify-send";
+      };
+    }
+  );
 in
 {
   options.services.micHealth = {
@@ -49,7 +75,11 @@ in
     };
 
     mode = lib.mkOption {
-      type = lib.types.enum [ "alert-only" "dry-run" "enforce" ];
+      type = lib.types.enum [
+        "alert-only"
+        "dry-run"
+        "enforce"
+      ];
       default = "alert-only";
       description = "alert-only installs no actuator; dry-run checks everything but never writes; enforce resets.";
     };
@@ -85,7 +115,60 @@ in
         assertion = cfg.mics != [ ] && lib.length cfg.mics <= 256;
         message = "services.micHealth.mics must list 1-256 microphones (index is one byte).";
       }
+      {
+        assertion = cfg.mode == "alert-only";
+        message = "services.micHealth.mode: only \"alert-only\" is implemented so far.";
+      }
     ];
-    warnings = [ "services.micHealth: skeleton only; no services are installed yet." ];
+
+    systemd.user.services.mic-probe = {
+      description = "Check idle microphones for the all-zero fault";
+      after = [ "pipewire.service" ];
+      wants = [ "pipewire.service" ];
+      unitConfig.ConditionUser = cfg.user;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/mic-probe --config ${configFile}";
+        # Up to 3 probes 60 s apart per mic, plus capture time.
+        TimeoutStartSec = "15min";
+        StateDirectory = "mic-health";
+        StateDirectoryMode = "0700";
+        UMask = "0077";
+        Nice = 10;
+        NoNewPrivileges = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        RestrictNamespaces = true;
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [
+          "@system-service"
+          "~@privileged @resources @mount"
+        ];
+        # Deny with EPERM rather than SIGSYS: PipeWire tries to raise thread priority and copes with a refusal.
+        SystemCallErrorNumber = "EPERM";
+        CapabilityBoundingSet = "";
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = "read-only";
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+      };
+    };
+
+    systemd.user.timers.mic-probe = {
+      description = "Periodic microphone health probe";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnStartupSec = "5min";
+        OnUnitInactiveSec = cfg.probeInterval;
+        RandomizedDelaySec = "60";
+      };
+    };
   };
 }
