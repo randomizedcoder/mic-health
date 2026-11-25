@@ -18,6 +18,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "Detect and recover stuck USB microphones (mic-probe + mic-reset)";
     homepage = "https://github.com/randomizedcoder/mic-health";
+    license = lib.licenses.mit;
     platforms = lib.platforms.linux;
   };
 }
