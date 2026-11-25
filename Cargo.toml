@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/mic-health-common", "crates/mic-probe", "crates/mic-reset"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+repository = "https://github.com/randomizedcoder/mic-health"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+panic = "abort"
+lto = true

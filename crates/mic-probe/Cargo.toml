@@ -1,0 +1,13 @@
+[package]
+name = "mic-probe"
+description = "Unprivileged detector: checks idle microphones for the all-zero fault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mic-health-common = { path = "../mic-health-common" }
