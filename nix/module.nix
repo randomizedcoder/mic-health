@@ -102,6 +102,14 @@ in
       description = "Global cap on resets per rolling 24 h.";
     };
 
+    configFile = lib.mkOption {
+      type = lib.types.path;
+      readOnly = true;
+      default = configFile;
+      defaultText = lib.literalMD "generated from `mics` and `mode`";
+      description = "Rendered JSON config, for other modules, e.g. a hotkey running `mic-probe --config <this> --report`.";
+    };
+
     mics = lib.mkOption {
       type = lib.types.listOf micType;
       default = [ ];

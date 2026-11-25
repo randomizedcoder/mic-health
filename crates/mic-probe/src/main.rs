@@ -69,35 +69,64 @@ fn text(m: Message) -> &'static str {
     }
 }
 
-fn observe(cfg: &Config, mic: &Mic) -> Observation {
+/// One probe: the gate's observation plus the measured peak, if any (for `--report`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Probe {
+    obs: Observation,
+    peak_dbfs: Option<f64>,
+}
+
+impl From<Observation> for Probe {
+    fn from(obs: Observation) -> Self {
+        Probe {
+            obs,
+            peak_dbfs: None,
+        }
+    }
+}
+
+/// One human-readable status line for `--report`.
+fn report_line(name: &str, p: Probe) -> String {
+    let what = match (p.obs, p.peak_dbfs) {
+        (Observation::Ok(_), Some(peak)) => format!("ok (peak {peak:.1} dBFS)"),
+        (Observation::Ok(_), None) => "ok".to_owned(),
+        (Observation::Dead(_), _) => "SILENT: exact zeros (muted?)".to_owned(),
+        (Observation::Busy, _) => "in use, not checked".to_owned(),
+        (Observation::Absent, _) => "NOT PRESENT".to_owned(),
+        (Observation::Error, _) => "check failed".to_owned(),
+    };
+    format!("{name}: {what}")
+}
+
+fn observe(cfg: &Config, mic: &Mic) -> Probe {
     let dump = match capture::pw_dump(&cfg.tools.pw_dump) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("<4>{}: pw-dump failed: {e}", mic.name);
-            return Observation::Error;
+            return Observation::Error.into();
         }
     };
     match pipewire::source_state(&dump, &mic.source) {
-        SourceState::Absent => return Observation::Absent,
-        SourceState::Busy => return Observation::Busy,
+        SourceState::Absent => return Observation::Absent.into(),
+        SourceState::Busy => return Observation::Busy.into(),
         SourceState::Idle => {}
     }
     let addr = match sysfs::lookup(Path::new(sysfs::USB_DEVICES), mic) {
         sysfs::Lookup::Found(a) => a,
-        sysfs::Lookup::NotFound => return Observation::Absent,
+        sysfs::Lookup::NotFound => return Observation::Absent.into(),
         sysfs::Lookup::Ambiguous => {
             eprintln!(
                 "<3>{}: more than one USB device matches; refusing to guess",
                 mic.name
             );
-            return Observation::Error;
+            return Observation::Error.into();
         }
     };
     let bytes = match capture::record(&cfg.tools.pw_record, &mic.source) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("<4>{}: capture failed: {e}", mic.name);
-            return Observation::Error;
+            return Observation::Error.into();
         }
     };
     match classify(&bytes) {
@@ -109,18 +138,21 @@ fn observe(cfg: &Config, mic: &Mic) -> Observation {
                 "<6>{}: ok, peak {peak_dbfs:.1} dBFS, rms {rms_dbfs:.1} dBFS, usb {}:{}",
                 mic.name, addr.0, addr.1
             );
-            Observation::Ok(addr)
+            Probe {
+                obs: Observation::Ok(addr),
+                peak_dbfs: Some(peak_dbfs),
+            }
         }
         Verdict::Dead => {
             eprintln!(
                 "<5>{}: all-zero capture, usb {}:{}",
                 mic.name, addr.0, addr.1
             );
-            Observation::Dead(addr)
+            Observation::Dead(addr).into()
         }
         Verdict::Error => {
             eprintln!("<4>{}: short capture ({} bytes)", mic.name, bytes.len());
-            Observation::Error
+            Observation::Error.into()
         }
     }
 }
@@ -156,7 +188,7 @@ fn notify(tool: &Path, summary: &str, body: &str) {
 
 fn probe_mic(cfg: &Config, mic: &Mic, st: &mut state::Entry) {
     let decision = loop {
-        let obs = observe(cfg, mic);
+        let obs = observe(cfg, mic).obs;
         let d = st.gate.step(obs);
         if d != Decision::Recheck {
             if let (Decision::ResetWarranted, Observation::Dead(addr)) = (d, obs) {
@@ -206,10 +238,11 @@ fn load_config(path: &str) -> Result<Config, String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let path = match args.as_slice() {
-        [flag, path] if flag == "--config" => path,
+    let (path, report) = match args.as_slice() {
+        [flag, path] if flag == "--config" => (path, false),
+        [flag, path, r] if flag == "--config" && r == "--report" => (path, true),
         _ => {
-            eprintln!("usage: mic-probe --config <file.json>");
+            eprintln!("usage: mic-probe --config <file.json> [--report]");
             return ExitCode::from(2);
         }
     };
@@ -220,6 +253,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if report {
+        // One probe per mic, no re-checks, no notifications, and the gate state is left
+        // untouched: a status snapshot, e.g. for a hotkey.
+        for mic in &cfg.mics {
+            println!("{}", report_line(&mic.name, observe(&cfg, mic)));
+        }
+        return ExitCode::SUCCESS;
+    }
     if cfg.mode != Mode::AlertOnly {
         eprintln!(
             "<4>mode {:?} is not implemented in this build; running alert-only",
@@ -250,6 +291,59 @@ mod tests {
     use super::*;
     use Decision as D;
     use Notice as N;
+
+    #[test]
+    fn report_line_table() {
+        struct Case {
+            description: &'static str,
+            probe: Probe,
+            expected: &'static str,
+        }
+        let a = (5, 8);
+        let cases = [
+            Case {
+                description: "ok with level",
+                probe: Probe {
+                    obs: Observation::Ok(a),
+                    peak_dbfs: Some(-36.94),
+                },
+                expected: "blue: ok (peak -36.9 dBFS)",
+            },
+            Case {
+                description: "ok without level (corner)",
+                probe: Observation::Ok(a).into(),
+                expected: "blue: ok",
+            },
+            Case {
+                description: "dead",
+                probe: Observation::Dead(a).into(),
+                expected: "blue: SILENT: exact zeros (muted?)",
+            },
+            Case {
+                description: "busy",
+                probe: Observation::Busy.into(),
+                expected: "blue: in use, not checked",
+            },
+            Case {
+                description: "absent",
+                probe: Observation::Absent.into(),
+                expected: "blue: NOT PRESENT",
+            },
+            Case {
+                description: "error",
+                probe: Observation::Error.into(),
+                expected: "blue: check failed",
+            },
+        ];
+        for c in cases {
+            assert_eq!(
+                report_line("blue", c.probe),
+                c.expected,
+                "{}",
+                c.description
+            );
+        }
+    }
 
     #[test]
     fn transition_table() {
